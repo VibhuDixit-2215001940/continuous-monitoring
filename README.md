@@ -25,6 +25,7 @@ Currently, the system focuses on detecting **failed logon attempts** as a basic 
 - Host-based IDS functionality
 - Real-time alert transmission from client to collector
 - Basic threat reporting and logging
+- USB Monitoring
 - <img width="1365" height="767" alt="image" src="https://github.com/user-attachments/assets/24905972-0d2b-4c73-bd76-baed8c64b169" />
 
 
