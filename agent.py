@@ -257,7 +257,6 @@ def monitor_powershell_flags_wmi():
             if process_name not in ("powershell.exe", "pwsh.exe"):
                 continue
 
-            # 🔥 Get REAL command line from Win32_Process
             procs = ps_wmi.query(
                 f"SELECT CommandLine FROM Win32_Process WHERE ProcessId={pid}"
             )
@@ -284,6 +283,116 @@ def monitor_powershell_flags_wmi():
             time.sleep(1)
 
 
+# ================= PROCESS CPU / MEMORY SPIKE MONITOR =================
+def monitor_process_spikes():
+    import pythoncom
+    pythoncom.CoInitialize()
+
+    proc_wmi = wmi.WMI()
+
+    print("[+] Monitoring process CPU & memory abuse (THREAT MODE)")
+
+    CPU_SPIKE_DELTA = 25.0        # %
+    CPU_ABSOLUTE_MIN = 30.0       # %
+    MEM_SPIKE_MB = 300            # MB
+    MEM_ABSOLUTE_MB = 400         # MB
+
+    POLL_INTERVAL = 5             # seconds
+    REQUIRED_HITS = 2             # consecutive samples
+
+    # === ALLOWLIST (NOISE REDUCTION) ===
+    ALLOWLIST = {
+        "chrome.exe", "msedge.exe", "firefox.exe",
+        "code.exe", "devenv.exe",
+        "teams.exe", "slack.exe",
+        "outlook.exe"
+    }
+
+    last_stats = {}
+    hit_counter = {}  # pid -> consecutive hits
+
+    while True:
+        try:
+            processes = proc_wmi.Win32_PerfFormattedData_PerfProc_Process()
+
+            for p in processes:
+                if not p.IDProcess or p.Name in ("_Total", "Idle"):
+                    continue
+
+                pid = int(p.IDProcess)
+                name = (p.Name or "").lower()
+
+                if name in ALLOWLIST:
+                    continue
+
+                cpu = float(p.PercentProcessorTime)
+                mem_mb = int(p.WorkingSetPrivate) // (1024 * 1024)
+
+                if pid in last_stats:
+                    prev = last_stats[pid]
+
+                    cpu_delta = cpu - prev["cpu"]
+                    mem_delta = mem_mb - prev["mem"]
+
+                    threat = False
+                    severity = "MEDIUM"
+
+                    # 🚨 CONDITION 1: CPU ABUSE (SUSTAINED)
+                    if (
+                        cpu_delta >= CPU_SPIKE_DELTA and
+                        cpu >= CPU_ABSOLUTE_MIN
+                    ):
+                        hit_counter[pid] = hit_counter.get(pid, 0) + 1
+                        if hit_counter[pid] >= REQUIRED_HITS:
+                            threat = True
+                            severity = "MEDIUM"
+                    else:
+                        hit_counter[pid] = 0
+
+                    # 🚨 CONDITION 2: MEMORY INJECTION (IMMEDIATE)
+                    if (
+                        mem_delta >= MEM_SPIKE_MB and
+                        mem_mb >= MEM_ABSOLUTE_MB
+                    ):
+                        threat = True
+                        severity = "HIGH"
+
+                    # 🚨 CONDITION 3: HYBRID (MOST RELIABLE)
+                    if (
+                        cpu_delta >= 15.0 and
+                        mem_delta >= 200
+                    ):
+                        threat = True
+                        severity = "CRITICAL"
+
+                    if threat:
+                        requests.post(COLLECTOR, json={
+                            "host": HOST,
+                            "event": "PROCESS_RESOURCE_ABUSE",
+                            "severity": severity,
+                            "process": name,
+                            "pid": pid,
+                            "cpu_percent": round(cpu, 2),
+                            "cpu_delta": round(cpu_delta, 2),
+                            "memory_mb": mem_mb,
+                            "memory_delta_mb": mem_delta,
+                            "threat": "PROCESS_RESOURCE_ABUSE"
+                        }, timeout=2)
+
+                        print(
+                            f"🚨 [{severity}] {name} (PID {pid}) | "
+                            f"CPU {cpu:.1f}% (+{cpu_delta:.1f}) | "
+                            f"MEM {mem_mb}MB (+{mem_delta}MB)"
+                        )
+
+                last_stats[pid] = {"cpu": cpu, "mem": mem_mb}
+
+            time.sleep(POLL_INTERVAL)
+
+        except Exception as ex:
+            print("[!] Process Threat Monitor Error:", ex)
+            time.sleep(2)
+
 # ================= START THREADS =================
 
 usb_thread = threading.Thread(target=monitor_usb_devices, daemon=True)
@@ -291,6 +400,10 @@ usb_thread.start()
 
 ps_thread = threading.Thread(target=monitor_powershell_flags_wmi, daemon=True)
 ps_thread.start()
+
+proc_thread = threading.Thread(target=monitor_process_spikes,daemon=True)
+proc_thread.start()
+
 
 # ================= MAIN THREAD = FAILED LOGIN =================
 
